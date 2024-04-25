@@ -1,10 +1,11 @@
 use base64::{engine::general_purpose, Engine as _};
 use wasm_bindgen::prelude::*;
 
+use image::io::Reader;
+use image::ImageFormat;
 use js_sys::{ArrayBuffer, Uint8Array};
-use web_sys::{
-    Blob, CanvasRenderingContext2d, File, FileReader, HtmlCanvasElement, HtmlImageElement,
-};
+use std::io::Cursor;
+use web_sys::{Blob, FileReader, HtmlImageElement};
 
 #[wasm_bindgen]
 extern "C" {
@@ -28,19 +29,32 @@ fn main() -> Result<(), String> {
 
 #[wasm_bindgen]
 pub struct FileHolder {
-    internal: Blob,
+    blob: Option<Blob>,
 }
 
 #[wasm_bindgen]
 impl FileHolder {
     #[wasm_bindgen(constructor)]
-    pub fn new(internal: Blob) -> Self {
-        Self { internal }
+    pub fn new() -> Self {
+        web_sys::console::log_1(&JsValue::from_str("Hello world! This is WASM speaking."));
+        Self { blob: None }
     }
 
-    pub fn render(&self) {
+    pub fn set_blob(&mut self, blob: Blob) {
+        self.blob = Some(blob);
+    }
+
+    pub fn render_with_blurry(&mut self, value: f32) {
+        let closure = Closure::new(render_image_with_blurriness(value) as Box<dyn FnMut(JsValue)>);
+        let _promise = self.blob.as_mut().unwrap().array_buffer().then(&closure);
+
+        closure.forget();
+    }
+
+    pub fn render(&mut self) {
         let reader = FileReader::new().unwrap();
-        reader.read_as_data_url(&self.internal).unwrap();
+        let blob = self.blob.as_mut().unwrap();
+        reader.read_as_data_url(blob).unwrap();
         let onloadend: Closure<dyn Fn(web_sys::Event)> =
             Closure::new(render_image_as_data_url() as Box<dyn Fn(web_sys::Event)>);
         reader.set_onloadend(Some(onloadend.as_ref().unchecked_ref()));
@@ -56,17 +70,36 @@ fn render_image_as_data_url() -> Box<dyn Fn(web_sys::Event)> {
 
         let document = web_sys::window().unwrap().document().unwrap();
 
-        let _ctx = document
-            .query_selector("canvas")
+        let image_elem = document
+            .create_element("img")
             .unwrap()
-            .unwrap()
-            .dyn_into::<HtmlCanvasElement>()
-            .unwrap()
-            .get_context("2d")
-            .unwrap()
-            .unwrap()
-            .dyn_into::<CanvasRenderingContext2d>()
+            .dyn_into::<HtmlImageElement>()
             .unwrap();
+
+        image_elem.set_src(&string);
+
+        document.body().unwrap().append_child(&image_elem).unwrap();
+    })
+}
+
+fn render_image_with_blurriness(blur_value: f32) -> Box<dyn FnMut(JsValue)> {
+    Box::new(move |e: wasm_bindgen::JsValue| {
+        let uint8 = Uint8Array::new(&e).to_vec();
+
+        let rdr = Reader::new(Cursor::new(uint8))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        rdr.unsharpen(blur_value, 100000);
+        rdr.grayscale();
+
+        let mut vec = Cursor::new(Vec::new());
+        rdr.write_to(&mut vec, ImageFormat::Png).unwrap();
+        let base64 = general_purpose::STANDARD.encode(vec.into_inner());
+        let string = format!("data:image/png;base64, {base64}");
+
+        let document = web_sys::window().unwrap().document().unwrap();
 
         let image_elem = document
             .create_element("img")
